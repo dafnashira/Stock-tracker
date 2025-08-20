@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>מעקב מניות · Yahoo (Dual Mode)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:0;background:#f7fafc;color:#0f172a}
+    header{background:#0f172a;color:#fff;padding:14px 16px;position:sticky;top:0}
+    h1{margin:0;font-size:18px}
+    main{max-width:980px;margin:0 auto;padding:14px}
+    .card{background:#fff;border-radius:14px;box-shadow:0 6px 22px rgba(2,6,23,.06);margin-bottom:14px;overflow:hidden}
+    .card h2{margin:0;padding:10px 12px;background:#eef2f7;font-size:15px}
+    .c{padding:12px}
+    .row{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}
+    .col-4{grid-column:span 4}.col-6{grid-column:span 6}.col-12{grid-column:span 12}
+    input,button{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;background:#fff}
+    button{cursor:pointer;background:#0f172a;color:#fff;border:none;font-weight:600}
+    button.s{background:#475569}
+    table{width:100%;border-collapse:collapse;background:#fff}
+    th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}
+    th{background:#f8fafc}
+    .muted{color:#64748b}
+    #status{position:fixed;bottom:10px;right:10px;background:#111827;color:#fff;padding:8px 12px;border-radius:12px;display:none}
+    label.switch{display:inline-flex;align-items:center;gap:8px}
+  </style>
+</head>
+<body>
+  <header><h1>מעקב מניות · Yahoo (מצב כפול: ישיר/פרוקסי)</h1></header>
+  <main>
+    <div class="card"><h2>עדכון</h2><div class="c" id="controls"></div></div>
+    <div class="card"><h2>טבלה</h2><div class="c" id="table"></div></div>
+    <div class="card"><h2>הגדרות</h2><div class="c" id="settings"></div></div>
+    <div class="card"><h2>אבחון</h2><div class="c"><div id="diag" class="muted">מוכן.</div></div></div>
+  </main>
+  <div id="status"></div>
+
+<script>
+(() => {
+  const API_PROXY = '/.netlify/functions/yahoo'; // אם יש פונקציה
+  const API_YF_QUOTE = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=';
+  const API_YF_CHART = (s,from)=>{
+    const p1 = Math.floor(new Date(from).getTime()/1000), p2 = Math.floor(Date.now()/1000);
+    return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}?period1=${p1}&period2=${p2}&interval=1d&events=div%2Csplit`;
+  };
+  const LS_DATA = 'st-dual-data'; const LS_SET = 'st-dual-settings';
+  const $ = s=>document.querySelector(s);
+  const state = {
+    data: JSON.parse(localStorage.getItem(LS_DATA)||'[]'),
+    set: JSON.parse(localStorage.getItem(LS_SET)||'{"symbols":"GOOGL,AAPL,NVDA,PLTR,META,ORCL,BTC-USD,^GSPC,^NDX,^VIX","useProxy":true}')
+  };
+  function save(){ localStorage.setItem(LS_DATA, JSON.stringify(state.data)); localStorage.setItem(LS_SET, JSON.stringify(state.set)); }
+  function status(msg){ const el=$('#status'); el.textContent=msg; el.style.display='block'; clearTimeout(status._t); status._t=setTimeout(()=>el.style.display='none', 3500); }
+  const fmt=(n,d=2)=> (n==null||Number.isNaN(n)) ? '—' : new Intl.NumberFormat(undefined,{maximumFractionDigits:d}).format(+n);
+  const key=r=>r.symbol+'|'+r.date;
+  function upsert(rows){ const m=new Map(state.data.map((r,i)=>[key(r),i])); rows.forEach(r=>{const k=key(r); if(m.has(k)) state.data[m.get(k)]={...state.data[m.get(k)],...r}; else state.data.push(r)}); save(); }
+
+  function diag(t){ $('#diag').textContent = t; }
+
+  async function fetchQuotes(){
+    const csv = state.set.symbols;
+    if(!state.set.useProxy){
+      const url = API_YF_QUOTE + encodeURIComponent(csv);
+      const r = await fetch(url); if(!r.ok) throw new Error('Yahoo direct failed: '+r.status); const j = await r.json();
+      return j?.quoteResponse?.result || [];
+    } else {
+      const url = API_PROXY + '?type=quote&symbols=' + encodeURIComponent(csv);
+      const r = await fetch(url); if(!r.ok) throw new Error('Proxy quote failed: '+r.status); const j = await r.json();
+      return j.result || [];
+    }
+  }
+  async function fetchHistory(sym, from){
+    if(!state.set.useProxy){
+      const r = await fetch(API_YF_CHART(sym, from)); if(!r.ok) throw new Error('Yahoo direct history failed: '+r.status); const j = await r.json();
+      const c = j?.chart?.result?.[0]; const ts=c?.timestamp||[]; const q=c?.indicators?.quote?.[0]||{}; const rows=[];
+      for(let i=0;i<ts.length;i++){ const date=new Date(ts[i]*1000).toISOString().slice(0,10);
+        const row={date, symbol:sym, open:q.open?.[i]??null, high:q.high?.[i]??null, low:q.low?.[i]??null, close:q.close?.[i]??null, volume:q.volume?.[i]??null, notes:'yahoo-direct'};
+        if(row.close!=null) rows.push(row);
+      } return rows;
+    } else {
+      const url = API_PROXY + '?type=history&symbol=' + encodeURIComponent(sym) + '&from=' + encodeURIComponent(from);
+      const r = await fetch(url); if(!r.ok) throw new Error('Proxy history failed: '+r.status); const j = await r.json(); return j.rows || [];
+    }
+  }
+
+  async function updateToday(){
+    try{
+      const arr = await fetchQuotes();
+      const today = new Date().toISOString().slice(0,10);
+      const rows = arr.map(q=>({date:today,symbol:q.symbol,
+        open:q.regularMarketOpen??q.open??null, high:q.regularMarketDayHigh??q.dayHigh??null,
+        low:q.regularMarketDayLow??q.dayLow??null, close:q.regularMarketPrice??q.regularMarketPreviousClose??q.previousClose??null,
+        volume:q.regularMarketVolume??q.volume??null, notes: state.set.useProxy ? 'proxy' : 'direct'}));
+      const toAdd = rows.filter(r=>!state.data.some(x=>x.symbol===r.symbol && x.date===r.date));
+      upsert(toAdd); renderTable(); status('נוספו '+toAdd.length+' שורות.');
+    }catch(e){ status('שגיאה: '+e.message); diag('שגיאה ב-updateToday: '+e.message); }
+  }
+
+  async function importAug2025(){
+    const list = state.set.symbols.split(',').map(s=>s.trim()).filter(Boolean);
+    let total=0; for(const sym of list){ try{
+      const rows = await fetchHistory(sym,'2025-08-01');
+      const missing = rows.filter(r=>!state.data.some(x=>x.symbol===r.symbol && x.date===r.date));
+      upsert(missing); total+=missing.length; status(sym+': +'+missing.length);
+    }catch(e){ status(sym+': '+e.message); diag('שגיאה ב-history('+sym+'): '+e.message); } }
+    renderTable(); status('הסתיים ייבוא – נוספו '+total+' שורות.');
+  }
+
+  function h(t,a={},c=[]){ const el=document.createElement(t);
+    Object.entries(a).forEach(([k,v])=>{ if(k==='class') el.className=v; else if(k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(),v); else if(k==='value') el.value=v; else el.setAttribute(k,v); });
+    (Array.isArray(c)?c:[c]).forEach(x=> el.appendChild(typeof x==='string'?document.createTextNode(x):x)); return el; }
+
+  function renderControls(){ const box=$('#controls'); box.innerHTML='';
+    const run=h('button',{onclick:updateToday},'עדכון נתוני היום (Yahoo)');
+    const hist=h('button',{class:'s',onclick:importAug2025},'ייבוא היסטורי מאוגוסט 2025');
+    const cb=h('input',{type:'checkbox'}); cb.checked=!!state.set.useProxy; cb.onchange=e=>{state.set.useProxy=e.target.checked; save(); diag('מצב: '+(state.set.useProxy?'פרוקסי (Netlify Function)':'ישיר ל-Yahoo'));};
+    box.append(h('div',{class:'row'},[h('div',{class:'col-4'},run),h('div',{class:'col-4'},hist),h('div',{class:'col-4'},h('label',{class:'switch'},[cb,' השתמש בפרוקסי (מומלץ)']))]));
+    diag('מצב: '+(state.set.useProxy?'פרוקסי (Netlify Function)':'ישיר ל-Yahoo'));
+  }
+  function renderTable(){ const t=$('#table'); t.innerHTML='';
+    const head=['תאריך','סימול','פתיחה','גבוה','נמוך','סגירה','נפח','הערות']; const rows=[...state.data].sort((a,b)=>a.date.localeCompare(b.date));
+    const table=h('table',{},[h('thead',{},h('tr',{},head.map(x=>h('th',{},x)))),h('tbody',{},rows.length?rows.map(r=>h('tr',{},[
+      h('td',{},r.date),h('td',{},r.symbol),h('td',{},fmt(r.open)),h('td',{},fmt(r.high)),h('td',{},fmt(r.low)),h('td',{},fmt(r.close)),h('td',{},fmt(r.volume,0)),h('td',{},r.notes||'')
+    ])):[h('tr',{},[h('td',{colspan:'8',class:'muted'},'אין נתונים')])])]); t.append(table);
+  }
+  function renderSettings(){ const s=$('#settings'); s.innerHTML=''; const inp=h('input',{value:state.set.symbols,oninput:e=>{state.set.symbols=e.target.value; save();}});
+    s.append(h('div',{class:'row'},[h('div',{class:'col-12'},h('div',{},[h('div',{class:'muted',style:'margin-bottom:6px'},'רשימת סימולים (CSV)'),inp]))])); }
+  function init(){ renderControls(); renderTable(); renderSettings(); }
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>
